@@ -187,45 +187,61 @@ func influxQueryDuration(now time.Time, query, start, end, groupByInterval strin
 	return s.String(), nil
 }
 
-func timeInfluxRequest(e *State, T miniprofiler.Timer, db, query, startDuration, endDuration, groupByInterval string) (s []influxModels.Row, err error) {
+func timeInfluxRequest(e *State, T miniprofiler.Timer, dbs, query, startDuration, endDuration, groupByInterval string) (s []influxModels.Row, err error) {
 	q, err := influxQueryDuration(e.now, query, startDuration, endDuration, groupByInterval)
 	if err != nil {
 		return nil, err
 	}
+
 	conn, err := client.NewHTTPClient(e.InfluxConfig)
 	if err != nil {
 		return nil, err
 	}
-	q_key := fmt.Sprintf("%s: %s", db, q)
-	T.StepCustomTiming("influx", "query", q_key, func() {
-		getFn := func() (interface{}, error) {
-			res, err := conn.Query(client.Query{
-				Command:  q,
-				Database: db,
-			})
-			if err != nil {
-				return nil, err
-			}
-			if res.Error() != nil {
-				return nil, res.Error()
-			}
-			if len(res.Results) != 1 {
-				return nil, fmt.Errorf("influx: expected one result")
-			}
+	defer conn.Close()
 
-			r := res.Results[0]
-			if r.Err == "" {
-				return r.Series, nil
+	s = make([]influxModels.Row, 0)
+
+	for _, db := range strings.Split(dbs, ",") {
+		db = strings.TrimSpace(db)
+		q_key := fmt.Sprintf("%s: %s", db, q)
+
+		T.StepCustomTiming("influx", "query", q_key, func() {
+			getFn := func() (interface{}, error) {
+				res, err := conn.Query(client.Query{
+					Command:  q,
+					Database: db,
+				})
+				if err != nil {
+					return nil, err
+				}
+				if res.Error() != nil {
+					return nil, res.Error()
+				}
+				if len(res.Results) != 1 {
+					return nil, fmt.Errorf("influx: expected one result")
+				}
+
+				r := res.Results[0]
+				if r.Err == "" {
+					return r.Series, nil
+				}
+				err = fmt.Errorf(r.Err)
+				return r.Series, err
 			}
-			err = fmt.Errorf(r.Err)
-			return r.Series, err
+			var val interface{}
+			val, err = e.Cache.Get(q_key, getFn)
+
+			if rows, ok := val.([]influxModels.Row); ok {
+				s = append(s, rows...)
+			} else {
+				err = fmt.Errorf("influx: did not get a valid result from InfluxDB")
+			}
+		})
+
+		if err != nil {
+			return
 		}
-		var val interface{}
-		var ok bool
-		val, err = e.Cache.Get(q_key, getFn)
-		if s, ok = val.([]influxModels.Row); !ok {
-			err = fmt.Errorf("influx: did not get a valid result from InfluxDB")
-		}
-	})
+	}
+
 	return
 }
